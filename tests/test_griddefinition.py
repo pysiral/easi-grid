@@ -1,5 +1,5 @@
 import pytest
-from gridinit import GridDefinition
+from easi_grid import GridDefinition
 from pydantic import ValidationError
 
 # Test data for happy path scenarios

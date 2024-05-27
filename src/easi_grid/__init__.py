@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
-from typing import Tuple, Union, Dict
-from pydantic import BaseModel, Field, field_validator, model_validator, PositiveFloat, ConfigDict
+import xarray as xr
+import contextlib
+from typing import Tuple, Union, Dict, Optional, Literal
+from pydantic import (
+    BaseModel, Field, field_validator, model_validator, ConfigDict,
+    computed_field, PositiveFloat
+)
 from pyproj import CRS, Proj
 from pyproj.exceptions import CRSError
 from functools import cached_property
 from numbers import Real
-from .presets import GridPresets, GridPresetEntry
+from pyresample import geometry
+
+
+from easi_grid.presets import GridPresets, GridPresetEntry
 
 
 __all__ = ["Grid", "GridDefinition", "GridData", "GridPresets"]
@@ -17,6 +25,7 @@ __author__ = "Stefan Hendricks"
 class GridDefinition(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
     epsg: int = Field(description="epsg code")
     extent_m: Tuple[Real, Real, Real, Real] = Field(
         description="[x_min, x_max, y_min, y_max] in projection coordinates (meter)"
@@ -24,6 +33,7 @@ class GridDefinition(BaseModel):
     resolution_m: PositiveFloat = Field(
         description="Spatial resolution in meter (isotropic grid resolution)"
     )
+    id: Optional[str] = None
 
     @field_validator("epsg")
     @classmethod
@@ -59,13 +69,24 @@ class GridDefinition(BaseModel):
     def proj(self) -> Proj:
         return Proj(self.crs)
 
-    @cached_property
+    @computed_field
+    @property
     def num_x(self) -> int:
         return int((self.extent_m[1]-self.extent_m[0])/self.resolution_m)
 
-    @cached_property
+    @computed_field
+    @property
     def num_y(self) -> int:
         return int((self.extent_m[3]-self.extent_m[2])/self.resolution_m)
+
+    @computed_field
+    @property
+    def name(self) -> str:
+        return self.crs.name
+
+    @cached_property
+    def repr(self) -> str:
+        return f"{self.name} {self.extent_m} @ {self.resolution_m}m ({self.num_x}x{self.num_x}"
 
 
 class GridData(object):
@@ -73,6 +94,69 @@ class GridData(object):
     def __init__(self, grid_def: GridDefinition):
         self.grid_def = grid_def
         self.lon, self.lat = self._compute_grid_coordinates()
+
+    def get_nan_array(self) -> np.ndarray:
+        return np.full((self.grid_def.num_y, self.grid_def.num_x), np.nan)
+
+    def get_lonlat_nc_vars(self, y_reversed: bool = False) -> Dict[str, xr.Variable]:
+        lon = np.flipud(self.lon) if y_reversed else self.lon
+        lat = np.flipud(self.lat) if y_reversed else self.lat
+        return {
+            "lon": xr.Variable(
+                dims=("xc", "yc"),
+                data=lon,
+                attrs={
+                    "units": "degrees_east",
+                    "long_name": "longitude coordinate",
+                    "standard_name": "longitude",
+                }
+            ),
+            "lat": xr.Variable(
+                dims=("xc", "yc"),
+                data=lat,
+                attrs={
+                    "units": "degrees_north",
+                    "long_name": "latitude coordinate",
+                    "standard_name": "latitude",
+                }
+            ),
+        }
+
+    def get_nc_coords(
+            self,
+            unit: Literal["m", "km"] = "km"
+    ) -> Dict[str, xr.Variable]:
+
+        if unit == "m":
+            xc, yc = self.xc, self.yc
+        elif unit == "km":
+            xc, yc = self.xc_km, self.yc_km
+        else:
+            raise ValueError(f"Unknown {unit=}, must be `m` or `km`")
+
+        coord_dict = {
+            "xc": xr.Variable(
+                dims=("xc",),
+                data=xc,
+                attrs={
+                    "axis": "X",
+                    "units": "km",
+                    "long_name": "x coordinate in Cartesian system",
+                    "standard_name": "projection_x_coordinate",
+                }
+            ),
+            "yc": xr.Variable(
+                dims=("yc",),
+                data=yc,
+                attrs={
+                    "axis": "Y",
+                    "units": "km",
+                    "long_name": "y coordinate in Cartesian system",
+                    "standard_name": "projection_y_coordinate",
+                }
+            )
+        }
+        return coord_dict
 
     def _compute_grid_coordinates(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -89,8 +173,9 @@ class GridData(object):
     @cached_property
     def grid_mapping(self) -> Tuple[str, Dict]:
         grid_mapping_dict = self.grid_def.crs.to_cf()
+        with contextlib.suppress(UserWarning):
+            grid_mapping_dict["proj4_str"] = self.grid_def.crs.to_proj4()
         grid_mapping_name = str(grid_mapping_dict["grid_mapping_name"])
-        grid_mapping_dict.pop("grid_mapping_name")
         grid_mapping_dict.pop("crs_wkt")
         return grid_mapping_name, grid_mapping_dict
 
@@ -129,12 +214,14 @@ class Grid(object):
             self,
             epsg: str,
             extent_m: Tuple[Real, Real, Real, Real],
-            resolution_m: Real
+            resolution_m: Real,
+            grid_id: str = None
     ):
         self._def = GridDefinition(
             epsg=epsg,
             extent_m=extent_m,
-            resolution_m=resolution_m
+            resolution_m=resolution_m,
+            id=grid_id
         )
         self._data = GridData(
             self._def
@@ -154,11 +241,11 @@ class Grid(object):
             grid = Grid.from_preset(GridPresets.cci_ease2_nh_25km)
 
         :param preset_name_or_entry: Either the name of the preset (see
-            gridinit.GridPreset.names() or a field of `gridinit.GridPreset)
+            easi_grid.GridPreset.names() or a field of `easi_grid.GridPreset)
 
         :raises ValueError: Invalid input or grid preset name
 
-        :return: Initialized gridinit.Grid instance
+        :return: Initialized easi_grid.Grid instance
         """
         if isinstance(preset_name_or_entry, str):
             preset_names = GridPresets.names()
@@ -174,6 +261,18 @@ class Grid(object):
 
     def get_data(self) -> GridData:
         return self._data
+
+    def get_nan_array(self, time_dim=False) -> np.ndarray:
+        return self._data.get_nan_array() if not time_dim else [self._data.get_nan_array()]
+
+    def get_pyresample_geometry(self) -> geometry.AreaDefinition:
+        grid_def = self.get_definition()
+        xmin, xmax, ymin, ymax = grid_def.extent_m
+        return geometry.AreaDefinition(
+            grid_def.id, grid_def.name, grid_def.crs.to_cf()["grid_mapping_name"],
+            grid_def.crs.to_dict(), grid_def.num_x, grid_def.num_y,
+            [xmin, ymin, xmax, ymax]
+        )
 
     def get_definition(self) -> GridDefinition:
         return self._def
@@ -195,6 +294,17 @@ class Grid(object):
         """
         projx, projy = self._def.proj(longitude, latitude, **kwargs)
         return projx, projy
+
+    @property
+    def id(self) -> str:
+        return str(self._def.id)
+
+    @cached_property
+    def array_shape(self) -> Tuple[int, int]:
+        return self._def.num_x, self._def.num_y
+
+    def __repr__(self) -> str:
+        return f"easi_grid.Grid: {self._def.repr}"
 
 #     def grid_indices(self, longitude, latitude):
 #         """

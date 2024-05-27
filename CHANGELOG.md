@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `gridinit.Grid` with basic functionality
-- `gridinit.presets.GridPresets` with basic list of grids
+- `easi_grid.Grid` with basic functionality
+- `easi_grid.presets.GridPresets` with basic list of grids
 - simple example tutorial
 - few pytests

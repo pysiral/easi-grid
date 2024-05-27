@@ -3,8 +3,8 @@ requires = ["setuptools", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gridinit"
-description = "Small python tool to initialize polar grids from code or from a yaml config file"
+name = "easi-grid"
+description = "Equal Area Sea Ice Grids - Pyresample/pyproj wrapper for sea ice remote sensing grids"
 readme = "README.md"
 version = "0.1"
 requires-python = ">=3.9"
@@ -27,6 +27,7 @@ dependencies = [
     "numpy",
     "pydantic",
     "pyproj",
+    "pyresample",
     "xarray"
 ]
 
